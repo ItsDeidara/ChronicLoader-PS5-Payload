@@ -12,6 +12,8 @@ ChronicLoader can:
 - Download `.zip` release assets and pull payload files out of them (i.e. shadowmountplus)
 - Save files into `/data/ps5_autoloader` or another folder you choose
 - Maintain `autoload.txt` with optional delays between payloads
+- Automatically append itself to `autoload.txt` so it runs on every boot
+- Back up the autoloader folder to a timestamped ZIP before making any changes
 - Keep a download log in `/data/chronicloader/chronic.log`
 - Keep SHA-256 state in `/data/chronicloader/chronic_state.json`
 - Read its runtime config from `/data/chronicloader/chronicloaderSettings.json`
@@ -33,18 +35,21 @@ Optional:
 - Runtime config: `/data/chronicloader/chronicloaderSettings.json`
 - Download log: `/data/chronicloader/chronic.log`
 - SHA-256 state: `/data/chronicloader/chronic_state.json`
+- Backups: `/data/chronicloader/chronicBackups/` (timestamped ZIP archives)
 
 ## How It Works
 
 When ChronicLoader runs, it:
 
 1. Loads `/data/chronicloader/chronicloaderSettings.json`
-2. Checks the latest release for each configured GitHub repo
-3. Finds the matching asset or assets
-4. Downloads them to the PS5
-5. Renames them to stable output names when needed
-6. Compares SHA-256 values so unchanged files do not get downloaded again unless something is missing or damaged
-7. Writes log and state entries with the source asset name, release tag, destination path, size, and SHA-256
+2. Backs up the autoloader folder to a timestamped ZIP (if backups are enabled)
+3. Checks the latest release for each configured GitHub repo
+4. Finds the matching asset or assets
+5. Downloads them to the PS5
+6. Renames them to stable output names when needed
+7. Compares SHA-256 values so unchanged files do not get downloaded again unless something is missing or damaged
+8. Writes log and state entries with the source asset name, release tag, destination path, size, and SHA-256
+9. Writes `autoload.txt` with all tracked entries and optionally appends itself as the last entry
 
 If the config folder is missing, ChronicLoader creates `/data/chronicloader/` and writes default template files for you.
 
@@ -67,17 +72,23 @@ The easiest way to build this file is with:
 
 `chronicloader_settings_builder.html`
 
-The file has three main parts:
+The file has four main parts:
 
 - `notifications`
   - Controls how chatty the payload is while it runs
-  - `verbose: false` keeps notifications minimal
-  - `verbose: true` shows friendlier progress notifications such as starting a download or extracting a zip
+  - `verbose: false` keeps notifications minimal and only shows per-repo results
+  - `verbose: true` shows progress notifications such as downloading, extracting, and verifying
 - `autoload`
   - Controls whether ChronicLoader also maintains `autoload.txt`
   - `enabled` turns autoload maintenance on or off
   - `output_path` is where the generated `autoload.txt` will be written
+  - `self_autoload` appends ChronicLoader itself as the last entry in `autoload.txt` with an 8-second delay so it runs again on every boot
   - `custom_entries` lets you preserve extra autoload lines that are not tied to a tracked repo entry
+- `backup`
+  - Controls automatic backup of the autoloader folder before ChronicLoader makes any changes
+  - `enabled` turns backups on or off
+  - `max_backups` sets how many backup ZIPs to keep (oldest are deleted when this limit is exceeded)
+  - Backups are saved to `/data/chronicloader/chronicBackups/` as timestamped ZIP files
 - `repos`
   - This is the list of GitHub release pages ChronicLoader will check
   - Each repo entry tells ChronicLoader what release page to inspect, which asset family to follow, where to save it, and whether to include it in autoload
@@ -111,34 +122,60 @@ A simple example looks like this:
 ```json
 {
   "notifications": {
-    "verbose": false
+    "verbose": true
   },
   "autoload": {
     "enabled": true,
     "output_path": "/data/ps5_autoloader/autoload.txt",
+    "self_autoload": true,
     "custom_entries": []
+  },
+  "backup": {
+    "enabled": true,
+    "max_backups": 5
   },
   "repos": [
     {
-      "release_url": "https://github.com/seregonwar/zftpd/releases",
+      "release_url": "https://github.com/drakmor/ShadowMountPlus/releases",
       "formats": "all",
       "dest_dir": "/data/ps5_autoloader",
-      "asset_rule": "re:^zftpd-ps5-(v)?[0-9][0-9A-Za-z._-]*\\.elf$",
-      "autoload_preview_name": "zftpd-ps5.elf",
+      "asset_rule": "re:^ShadowMountPlus_(v)?[0-9][0-9A-Za-z._-]*\\.zip$",
+      "autoload_preview_name": "ShadowMountPlus.zip",
       "autoload": true,
       "delay_before_ms": 0
     },
     {
-      "release_url": "https://github.com/drakmor/ShadowMountPlus/releases",
-      "formats": "elf",
+      "release_url": "https://github.com/seregonwar/zftpd/releases",
+      "formats": "all",
       "dest_dir": "/data/ps5_autoloader",
-      "asset_rule": "re:^ShadowMountPlus_(v)?[0-9][0-9A-Za-z._-]*\\.zip$",
-      "autoload_preview_name": "shadowmountplus.elf",
+      "asset_rule": "re:^zftpd-ps5-(v)?[0-9][0-9A-Za-z._-]*\\.bin$",
+      "autoload_preview_name": "zftpd-ps5.bin",
       "autoload": true,
-      "delay_before_ms": 5000
+      "delay_before_ms": 1000
+    },
+    {
+      "release_url": "https://github.com/ps5-payload-dev/klogsrv",
+      "formats": "all",
+      "dest_dir": "/data/ps5_autoloader",
+      "asset_rule": "exact:klogsrv-ps5.elf",
+      "autoload_preview_name": "klogsrv-ps5.elf",
+      "autoload": true,
+      "delay_before_ms": 2000
     }
   ]
 }
+```
+
+When `self_autoload` is enabled, ChronicLoader appends itself as the final entry in `autoload.txt` with an 8-second delay. It discovers its own filename using `/proc/curproc/file` so it works regardless of what the ELF is named. The generated `autoload.txt` for the example above would look like:
+
+```
+ShadowMountPlus.zip
+!1000
+zftpd-ps5.bin
+!2000
+klogsrv-ps5.elf
+!8000
+chronicloader.elf
 ```
 
 
@@ -168,17 +205,10 @@ That makes it easier to tell if a file was updated, skipped because it was alrea
 4. Let it pull the newest release files
 5. Leave your autoloader setup pointed at the stable output filenames in `/data/ps5_autoloader`
 
-## Troubleshooting
+## Backups
 
-If nothing downloads:
+When backups are enabled, ChronicLoader creates a ZIP archive of the entire autoloader folder before it starts downloading or updating anything. This means you always have a snapshot of what was working before each run.
 
-- Make sure the PS5 has network access
-- Make sure the repo URL is a real GitHub releases page
-- Check the live klog output
-- Check `/data/chronicloader/chronic.log`
-- Make sure the asset family you selected actually matches the latest release
+Backup files are saved to `/data/chronicloader/chronicBackups/` with timestamped names like `autoloader_20260407_143022.zip`. The `max_backups` setting controls how many of these are kept. When the limit is exceeded, the oldest backups are automatically deleted.
 
-If a zip repo downloads but nothing is extracted:
-
-- Check whether the payload file inside the zip is really an `.elf` or `.bin`
-- Rebuild the config in the HTML builder and inspect the latest release again
+If an update breaks something, you can extract the most recent backup ZIP to restore your previous payload files.
